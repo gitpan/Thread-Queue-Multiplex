@@ -1,0 +1,6 @@
+Changes for Thread::Queue::Multiplex
+
+0.90	2006-Jan-29 D. Arnold
+
+	- coded
+

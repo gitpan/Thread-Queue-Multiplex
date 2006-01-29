@@ -1,0 +1,7 @@
+Makefile.PL
+MANIFEST
+lib/Thread/Queue/Multiplex.pm
+t/01onesub.t
+t/02twosubs.t
+t/03foursubs.t
+Changes.txt
