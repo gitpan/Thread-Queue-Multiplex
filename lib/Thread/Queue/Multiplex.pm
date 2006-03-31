@@ -21,15 +21,15 @@ use base qw(Thread::Queue::Duplex);
 use strict;
 use warnings;
 
-our $VERSION = '0.90';
+our $VERSION = '0.92';
 
 =head1 NAME
 
-Thread::Queue::Multiplex  (I<aka> TQM) - thread-safe publish/subscribe queue
+Thread::Queue::Multiplex (I<aka> TQM) - thread-safe publish/subscribe queue
 
 =begin html
 
-<a href='http://www.presicient.com/tqm/Thread-Queue-Multiplex-0.90.tar.gz'>Thread-Queue-Multiplex-0.90.tar.gz</a>
+<a href='http://www.presicient.com/tqm/Thread-Queue-Multiplex-0.91.tar.gz'>Thread-Queue-Multiplex-0.91.tar.gz</a>
 
 =end html
 
@@ -44,7 +44,7 @@ Thread::Queue::Multiplex  (I<aka> TQM) - thread-safe publish/subscribe queue
 	#
 	#	register as a subscriber
 	#
-	$tqm->subscribe();
+	$tqm->subscribe('myID');
 	#
 	#	unregister as a subscriber
 	#
@@ -134,7 +134,8 @@ Thread::Queue::Multiplex  (I<aka> TQM) - thread-safe publish/subscribe queue
 
 A subclass of L<Thread::Queue::Duplex> I<aka> B<TQD> which implements a
 "publish and subscribe" communications model for threads. Subscribers
-register with the queue, which registers the TID of the subscriber's thread
+register with the queue, which registers either the provided subscriber ID,
+or, if no ID is provided, 1 plus the TID of the subscriber's thread,
 as a subscriber ID. As the publisher publishes
 messages to the queue, each subscriber receives
 a copy of the message. If the publication is B<not> simplex, the publisher
@@ -159,9 +160,12 @@ of L<Thread::Queue::Duplex> by
 =item *
 
 adding a shared hash to hold the list of unique subscriber ID's
-(derived from L<threads>C<-E<gt>self()-E<gt>tid()> when the
+(provided either explicitly with C<subscribe()>, or derived from
+1 + L<threads>C<-E<gt>self()-E<gt>tid()> when the
 subscriber C<subscribe()>s) mapped to a threads::shared
-array to hold ID's of messages published to the subscriber
+array to hold ID's of messages published to the subscriber.
+(B<Note:> tid() + 1 is used in order to avoid an ID of zero
+for the root thread).
 
 =item *
 
@@ -187,6 +191,12 @@ This "pending response" hash is used to accumulate
 all subscriber responses; when the reference count of
 a message is zero, the hash of responses is posted to
 the final response message mapping hash.
+
+=item *
+
+adding a shared hash to hold the map of thread ID's to
+subscriber ID's. B<Note:> Each thread can have only a single
+subscriber.
 
 =item *
 
@@ -243,15 +253,20 @@ attempt to queue a request will block until the pending count
 drops below C<$limit>. This limit may be applied or modified later
 via the C<set_max_pending()> method (see below).
 
-=item B<subscribe()> I<aka> B<listen()>
+=item B<subscribe( >I<[ $subID ]>B< )> I<aka> B<listen()>
 
 Subscribe to the queue. The listen() alias is provided for
-compatibility with TQD apps.
+compatibility with TQD apps. If C<$subID> is not provided, 1 plus
+the current thread's TID is used as the subscriber ID.
+Only a single subscriber per thread is permitted; undef will
+be returned if the current thread already has a subscriber.
 
 =item B<unsubscribe()> I<aka> B<ignore()>
 
 Unsubscribe from the queue. The ignore() alias is provided for
-compatibility with TQD apps.
+compatibility with TQD apps. Note the subscriber for the current
+thread is unsubscribed. I<Unsubscribing another thread is not
+currently supported.>
 
 =item @subIDs = $tqm->B<get_subscribers()>
 
@@ -362,8 +377,11 @@ unsubscribe() for dead threads.
 
 =head1 SEE ALSO
 
-L<Thread::Queue::Duplex>, L<Thread::Queue::Queueable>,
-L<threads>, L<threads::shared>, L<Thread::Queue>
+L<Thread::Queue::Duplex>
+L<Thread::Queue::Queueable>,
+L<threads>
+L<threads::shared>
+L<Thread::Queue>
 
 =head1 AUTHOR, COPYRIGHT, & LICENSE
 
@@ -371,8 +389,9 @@ Dean Arnold, Presicient Corp. L<darnold@presicient.com>
 
 Copyright(C) 2006, Presicient Corp., USA
 
-Permission is granted to use this software under the same terms
-as Perl itself. Refer to the Perl Artistic License for details.
+Licensed under the Academic Free License version 2.1, as specified in the
+License.txt file included in this software package, or at OpenSource.org
+L<http://www.opensource.org/licenses/afl-2.1.php>.
 
 =cut
 
@@ -400,6 +419,7 @@ use base qw(Thread::Queue::Duplex);
 use constant TQM_SUBSCRIBERS => 8;
 use constant TQM_SUB_MAP => 9;
 use constant TQM_PENDING_MAP => 10;
+use constant TQM_SUB_ID_MAP => 11;
 #
 #	flags for special msgs
 #
@@ -464,30 +484,49 @@ sub new {
 #	map of msgids to their pending response info
 #
 	my %pendingresps : shared = ();
+#
+#	map of subscriber TIDs to their sub ID
+#
+	my %subids : shared = ();
 
 	$obj->[TQM_SUBSCRIBERS] = \%subscribers;
 	$obj->[TQM_SUB_MAP] = \%pendingmsgs;
 	$obj->[TQM_PENDING_MAP] = \%pendingresps;
+	$obj->[TQM_SUB_ID_MAP] = \%subids;
     return $obj;
 }
 
 sub subscribe {
 	my $obj = shift;
-	my $id = threads->self()->tid();
+	my $tid = threads->self()->tid() + 1;
+	my $id = shift || $tid;
 	lock(${$obj->[TQD_LISTENERS]});
+#
+#	we only permit a single subscriber per thread
+#
+	$@ = 'Thread $tid already subscribed as ' .
+		$obj->[TQM_SUB_ID_MAP]{$tid},
+	return undef
+		if $obj->[TQM_SUB_ID_MAP]{$tid};
+
 	${$obj->[TQD_LISTENERS]}++;
 	my @pending_msgs : shared = ();
 	$obj->[TQM_SUBSCRIBERS]{$id} = \@pending_msgs;
+	$obj->[TQM_SUB_ID_MAP]{$tid} = $id;
 	cond_broadcast(${$obj->[TQD_LISTENERS]});
 	return $obj;
 }
 
 sub unsubscribe {
 	my $obj = shift;
-	my $id = threads->self()->tid();
+	my $id = threads->self()->tid() + 1;
 	my $pending;
 	{
 		lock(${$obj->[TQD_LISTENERS]});
+		$@ = "No subscriber in thread $id.",
+		return undef
+			unless $obj->[TQM_SUB_ID_MAP]{$id};
+		$id = delete $obj->[TQM_SUB_ID_MAP]{$id};
 		$pending = delete $obj->[TQM_SUBSCRIBERS]{$id};
 		${$obj->[TQD_LISTENERS]}--
 			if ${$obj->[TQD_LISTENERS]};
@@ -554,20 +593,23 @@ sub get_subscribers {
 #
 sub wait_for_subscribers {
 	my ($obj, $count, $timeout) = @_;
-	lock(${$obj->[TQD_LISTENERS]});
+	my $listeners = $obj->[TQD_LISTENERS];
+	lock($$listeners);
 
 	return undef
 		if ($timeout && ($timeout < 0));
 
 	if ($timeout) {
 		$timeout += time();
-		1 while ((${$obj->[TQD_LISTENERS]} != $count) &&
-			cond_timedwait(${$obj->[TQD_LISTENERS]}, $timeout));
-		return (${$obj->[TQD_LISTENERS]} eq $count) ? $obj : undef;
+		cond_timedwait($$listeners, $timeout)
+			while ($$listeners != $count) && ($timeout > time());
+
+		return ($$listeners eq $count) ? $obj : undef;
 	}
-	1 while ((${$obj->[TQD_LISTENERS]} != $count) &&
-		cond_wait(${$obj->[TQD_LISTENERS]}));
-	return (${$obj->[TQD_LISTENERS]} == $count) ? $obj : undef;
+
+	cond_wait($$listeners)
+		while ($$listeners != $count);
+	return ($$listeners == $count) ? $obj : undef;
 }
 #
 #	override lock & load to include subid list
@@ -599,15 +641,16 @@ sub _lock_load {
 #	we don't do subs assignment until then (in case
 #	some subs unsubscribe while we're cond_waiting)
 #
-	lock(@{$obj->[TQD_Q]});
+	my $q = $obj->[TQD_Q];
+	lock(@$q);
 #
 #	check current length if we have a limit
 #
 	while (${$obj->[TQD_MAX_PENDING]} &&
 		(${$obj->[TQD_MAX_PENDING]} <= scalar keys %{$obj->[TQM_SUB_MAP]})) {
-#		print "pending before: ", scalar @{$obj->[TQD_Q]}, "\n";
-		cond_wait(@{$obj->[TQD_Q]});
-#		print "pending after: ", scalar @{$obj->[TQD_Q]}, "\n";
+#		print "pending before: ", scalar @$q, "\n";
+		cond_wait(@$q);
+#		print "pending after: ", scalar @$q, "\n";
 	}
 
 	my $firstonly = (defined($subs) && (! ref $subs) && ($subs == TQM_FIRST_ONLY));
@@ -631,12 +674,12 @@ sub _lock_load {
 #	at present, we'll use the TQD_Q lock to lock these as well
 #
 	foreach (@$subs) {
-		my $q = $obj->[TQM_SUBSCRIBERS]{$_};
+		my $s = $obj->[TQM_SUBSCRIBERS]{$_};
 		($flags & TQM_URGENT) ?
-		    unshift @$q, $msgid :
-		    push @$q, $msgid;
+		    unshift @$s, $msgid :
+		    push @$s, $msgid;
 	}
-    cond_signal @{$obj->[TQD_Q]};
+    cond_broadcast @$q;
     return $msgid;
 }
 
@@ -872,23 +915,28 @@ sub _get_request {
 sub dequeue  {
     my $obj = shift;
     my $request;
-    my $id = threads->self()->tid();
+    my $id = $obj->[TQM_SUB_ID_MAP]{threads->self()->tid() + 1};
+    $@ = 'No subscriber for thread ' . threads->self()->tid(),
+    return undef
+    	unless $id;
+
+	my $q = $obj->[TQD_Q];
     while (1) {
 
-		lock(@{$obj->[TQD_Q]});
-		my $q = $obj->[TQM_SUBSCRIBERS]{$id};
+		lock(@$q);
+		my $s = $obj->[TQM_SUBSCRIBERS]{$id};
 
-    	cond_wait @{$obj->[TQD_Q]}
-    		until scalar @$q;
+    	cond_wait @$q
+    		while (! scalar @$s);
 
 #   print $id, " dequeue\n";
 
-		$request = $obj->_get_request(shift @$q);
+		$request = $obj->_get_request(shift @$s);
 		next unless $request;
 #
 #	signal any waiters
 #
-    	cond_broadcast @{$obj->[TQD_Q]};
+    	cond_broadcast @$q;
     	last;
     }
     return _filter_dq($request);
@@ -902,30 +950,33 @@ sub dequeue_until {
 
 	$timeout += time();
 	my $request;
-    my $id = threads->self()->tid();
+    my $id = $obj->[TQM_SUB_ID_MAP]{threads->self()->tid() + 1};
+    $@ = 'No subscriber for thread ' . threads->self()->tid(),
+    return undef
+    	unless $id;
 
+	my $q = $obj->[TQD_Q];
 	while (1)
 	{
-		lock(@{$obj->[TQD_Q]});
-		my $q = $obj->[TQM_SUBSCRIBERS]{$id};
+		lock(@$q);
+		my $s = $obj->[TQM_SUBSCRIBERS]{$id};
 
-		1
-	   	while ((! scalar @$q) &&
-	   		cond_timedwait(@{$obj->[TQD_Q]}, $timeout));
+   		cond_timedwait(@$q, $timeout)
+	   		while (! scalar @$s) && ($timeout > time());
 #
 #	if none, then we must've timed out
 #
 		return undef
-			unless scalar @$q;
+			unless scalar @$s;
 
 #   print $id, " dequeue_until\n";
 
-		$request = $obj->_get_request(shift @$q);
+		$request = $obj->_get_request(shift @$s);
 		next unless $request;
 #
 #	signal any waiters
 #
-    	cond_broadcast @{$obj->[TQD_Q]};
+    	cond_broadcast @$q;
     	last;
 	}
     return _filter_dq($request);
@@ -934,21 +985,25 @@ sub dequeue_until {
 sub dequeue_nb {
     my $obj = shift;
     my $request;
-    my $id = threads->self()->tid();
+    my $id = $obj->[TQM_SUB_ID_MAP]{threads->self()->tid() + 1};
+    $@ = 'No subscriber for thread ' . threads->self()->tid(),
+    return undef
+    	unless $id;
+    my $q = $obj->[TQD_Q];
     while (1)
     {
-		lock(@{$obj->[TQD_Q]});
-		my $q = $obj->[TQM_SUBSCRIBERS]{$id};
+		lock(@$q);
+		my $s = $obj->[TQM_SUBSCRIBERS]{$id};
 		return undef
-			unless scalar @$q;
+			unless scalar @$s;
 #   print $id, " dequeue_nb\n";
 #
-		$request = $obj->_get_request(shift @$q);
+		$request = $obj->_get_request(shift @$s);
 		return undef unless $request;
 #
 #	signal any waiters
 #
-    	cond_broadcast @{$obj->[TQD_Q]};
+    	cond_broadcast @$q;
 		last;
 	}
     return _filter_dq($request);
@@ -957,20 +1012,24 @@ sub dequeue_nb {
 sub dequeue_urgent {
     my $obj = shift;
     my $request;
-    my $id = threads->self()->tid();
+    my $id = $obj->[TQM_SUB_ID_MAP]{threads->self()->tid() + 1};
+    $@ = 'No subscriber for thread ' . threads->self()->tid(),
+    return undef
+    	unless $id;
+    my $q = $obj->[TQD_Q];
     while (1)
     {
-		lock(@{$obj->[TQD_Q]});
-		my $q = $obj->[TQM_SUBSCRIBERS]{$id};
+		lock(@$q);
+		my $s = $obj->[TQM_SUBSCRIBERS]{$id};
 		return undef
-			unless scalar @$q;
+			unless scalar @$s;
 
-		$request = $obj->_get_request(shift @$q, 1);
+		$request = $obj->_get_request(shift @$s, 1);
 		return undef unless $request;
 #
 #	signal any waiters
 #
-    	cond_broadcast @{$obj->[TQD_Q]};
+    	cond_broadcast @$q;
     	last;
 	}
     return _filter_dq($request);
@@ -983,10 +1042,10 @@ sub pending {
 #	sub, return its queue; else return the
 #	number of keys in the request map
 #
-	my $id = threads->self()->tid();
+    my $id = $obj->[TQM_SUB_ID_MAP]{threads->self()->tid() + 1};
 	lock(@{$obj->[TQD_Q]});
 	return scalar keys %{$obj->[TQM_SUB_MAP]}
-		unless exists $obj->[TQM_SUBSCRIBERS]{$id};
+		unless defined($id) && exists $obj->[TQM_SUBSCRIBERS]{$id};
 #
 #	Texas 2 step to avoid issues w/ threads::shared
 #
@@ -1026,7 +1085,10 @@ sub _create_resp {
 sub respond {
 	my $obj = shift;
 	my $msgid = shift;
-	my $id = threads->self()->tid();
+    my $id = $obj->[TQM_SUB_ID_MAP]{threads->self()->tid() + 1};
+    $@ = 'No subscriber for thread ' . threads->self()->tid(),
+    return undef
+    	unless $id;
 #
 #	silently ignore response to a simplex request
 #
@@ -1056,7 +1118,7 @@ sub respond {
 			delete $pending->{_refcnt};
 			lock(%{$obj->[TQD_MAP]});
 			$obj->[TQD_MAP]{$msgid} = delete $obj->[TQM_PENDING_MAP]{$msgid};
-		    cond_signal %{$obj->[TQD_MAP]};
+		    cond_broadcast %{$obj->[TQD_MAP]};
 #
 #	order is important; we always lock MAP before MARK
 #
@@ -1125,7 +1187,7 @@ sub _post_complete {
 			$count++;
 		}
 
-	    cond_signal %{$obj->[TQD_MAP]}
+	    cond_broadcast %{$obj->[TQD_MAP]}
 	    	if $count;
 	}
 

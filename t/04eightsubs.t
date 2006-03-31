@@ -19,4 +19,4 @@ report_result(1, 'load module');
 #
 #	runs the tests
 #
-TestCommon->run_test($ARGV[0] || 0, 4);
+TestCommon->run_test($ARGV[0] || 0, 8);

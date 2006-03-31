@@ -15,7 +15,7 @@ print "\nConfiguring Thread::Queue::Multiplex ...\n
 ";
 
 my %prereqs = (
-	'Thread::Queue::Duplex' => '0.90'
+	'Thread::Queue::Duplex' => '0.92'
 );
 
 my %opts =
@@ -29,7 +29,7 @@ my %opts =
 
 if ($ExtUtils::MakeMaker::VERSION >= 5.43) {
     $opts{'AUTHOR'} = 'Dean Arnold, Presicient Corp. (darnold@presicient.com)';
-    $opts{'ABSTRACT'} = 'TQD subclass to support publish/subscribe communication model for threads';
+    $opts{'ABSTRACT'} = 'TQD subclass to support publish/subscribe model for threads';
     $opts{'PREREQ_PM'} = \%prereqs;
 }
 
